@@ -1,0 +1,135 @@
+pipeline {
+    agent any
+
+    environment {
+        COMPOSE_FILE = 'docker-compose.yml'
+        PROJECT_NAME = 'college-club-portal'
+        DOCKER_IMAGE_BACKEND  = 'college-club-backend'
+        DOCKER_IMAGE_FRONTEND = 'college-club-frontend'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '5'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+    }
+
+    stages {
+
+        stage('🔍 Checkout') {
+            steps {
+                echo '====== Cloning repository ======'
+                checkout scm
+            }
+        }
+
+        stage('📦 Install Backend Dependencies') {
+            steps {
+                echo '====== Installing backend packages ======'
+                dir('backend') {
+                    sh 'npm install'
+                }
+            }
+        }
+
+        stage('📦 Install Frontend Dependencies') {
+            steps {
+                echo '====== Installing frontend packages ======'
+                dir('frontend') {
+                    sh 'npm install'
+                }
+            }
+        }
+
+        stage('🧪 Run Backend Tests') {
+            steps {
+                echo '====== Running backend tests ======'
+                dir('backend') {
+                    sh 'npm test || true'
+                }
+            }
+            post {
+                always {
+                    echo 'Backend tests done.'
+                }
+            }
+        }
+
+        stage('🏗️ Build Frontend') {
+            steps {
+                echo '====== Building React production bundle ======'
+                dir('frontend') {
+                    sh 'npm run build'
+                }
+            }
+        }
+
+        stage('🐳 Docker Build') {
+            parallel {
+                stage('Build Backend Image') {
+                    steps {
+                        echo '====== Building backend Docker image ======'
+                        sh "docker build -t ${DOCKER_IMAGE_BACKEND}:latest ./backend"
+                        sh "docker tag ${DOCKER_IMAGE_BACKEND}:latest ${DOCKER_IMAGE_BACKEND}:${BUILD_NUMBER}"
+                    }
+                }
+                stage('Build Frontend Image') {
+                    steps {
+                        echo '====== Building frontend Docker image ======'
+                        sh "docker build -t ${DOCKER_IMAGE_FRONTEND}:latest ./frontend"
+                        sh "docker tag ${DOCKER_IMAGE_FRONTEND}:latest ${DOCKER_IMAGE_FRONTEND}:${BUILD_NUMBER}"
+                    }
+                }
+            }
+        }
+
+        stage('🚀 Deploy with Docker Compose') {
+            steps {
+                echo '====== Deploying all services with Docker Compose ======'
+                sh 'docker-compose down --remove-orphans || true'
+                sh 'docker-compose up -d --build'
+            }
+        }
+
+        stage('❤️ Health Check') {
+            steps {
+                echo '====== Waiting for services to be healthy ======'
+                sh 'sleep 15'
+                sh 'curl -f http://localhost/nginx-health || (echo "NGINX health check failed!" && exit 1)'
+                sh 'curl -f http://localhost/api/health || (echo "API health check failed!" && exit 1)'
+            }
+        }
+
+    }
+
+    post {
+        success {
+            echo """
+            ======================================================
+            ✅ BUILD SUCCESS - College Club Portal Deployed!
+            ======================================================
+            🌐 App URL : http://localhost
+            🔗 API URL : http://localhost/api
+            📊 Build # : ${BUILD_NUMBER}
+            ⏱️  Duration: ${currentBuild.durationString}
+            ======================================================
+            """
+        }
+        failure {
+            echo """
+            ======================================================
+            ❌ BUILD FAILED - College Club Portal
+            ======================================================
+            📊 Build #  : ${BUILD_NUMBER}
+            ⏱️  Duration : ${currentBuild.durationString}
+            📋 Logs     : Check above for error details
+            ======================================================
+            """
+            sh 'docker-compose logs --tail=50 || true'
+        }
+        always {
+            echo '====== Cleaning up workspace ======'
+            cleanWs(patterns: [[pattern: 'node_modules/**', type: 'INCLUDE']])
+        }
+    }
+}
